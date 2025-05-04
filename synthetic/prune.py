@@ -7,18 +7,7 @@ import torch.nn as nn
 from model import MLP
 from dataset import get_dataloaders
 
-#from torch.utils.tensorboard import SummaryWriter
-
 from plot_decision_boundary import plot_decision_boundary
-
-'''
-class Logger:
-    def __init__(self, name):
-        self.writer = SummaryWriter(name)
-
-    def log(self, name, value, step):
-        self.writer.add_scalar(name, value, step)
-'''
         
 class Prune:
     def __init__(self, cfg):
@@ -120,9 +109,9 @@ class Prune:
         
         #Get the index of the lowest std that is not zero
         if self.random_prune:
-            lowest_std_indices = random.sample(range(total_length), 10)
+            lowest_std_indices = random.sample(range(total_length), self.cfg.prune.num_prune)
         else:
-            lowest_std_indices = indices[std_sorted != 0][:10]
+            lowest_std_indices = indices[std_sorted != 0][:self.cfg.prune.num_prune]
         self.prunned_idx[lowest_std_indices[0]] = 1
 
         prune_layers, prune_neurons, prune_weights = [], [], []
@@ -165,12 +154,7 @@ class Prune:
             if epoch % 50 == 0:
                 plot_decision_boundary(self.model, f"plots/{self.datatype}_{self.pruning_type}/{epoch}.png", test_accuracy, train_accuracy, miss_accuracy, biased=self.biased_dataset)
                 
-            #Get the number of model parameters that are not zero
-            num_parameters = 0
-            for layer, parameter in enumerate(self.model.parameters()):
-                if layer % 2 == 0:  #To avoid bias
-                    num_parameters += (parameter == 0).sum().item()
-                
+            #Find the prune candidates
             prune_layers, prune_neurons, prune_weights = self.find_prune_candidates()
 
             #Manual:
@@ -180,13 +164,15 @@ class Prune:
                     #print(parameter_idx, parameter.shape)
                     if (parameter_idx // 2) == prune_layer and parameter_idx % 2 == 0:  #To avoid bias
                         parameter.data[prune_neuron][prune_weight] = 0.0
-        
+            
 
             #Automatic:
             #Set the corresponding masks to zero
+            '''
             prune_layer, prune_neuron, prune_weight = prune_layers[0], prune_neurons[0], prune_weights[0]
             if random.random() < 0.4:
-                self.model.update_masks(prune_layer, prune_neuron, prune_weight)     
+                self.model.update_masks(prune_layer, prune_neuron, prune_weight) 
+            '''    
             
             #Retrain the model for 1 epoch on all training data
             for j in range(1):

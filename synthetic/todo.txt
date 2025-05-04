@@ -3,3 +3,28 @@ ReLU activation
 Without masks: Directly zero
 
 Add readme for training and pruning overfited models
+
+Trained with AdamW, prunned with:
+    AdamW       Works
+    AdamW       Works
+    SGD         Does not work
+
+ReLU (AdamW) works
+ReLU (Adam)  works
+ReLU (SGD)   WORKS !!  (More iterations)
+
+Just 2 instead of 10 weight drops
+ReLU (SGD)  works!
+ReLU (AdamW) works
+
+Just 2 instead of 10 weight drops
+Tanh (AdamW) works
+Tanh (SGD) Does not work
+
+---------------------------------------------------------------------------------------------
+---------------------------------------------------------------------------------------------
+Conclusions:
+    Synthetic testing is fairly robust to ReLU vs Tanh
+    SGD can work but also doesnt sometimes, may require tuning of how many neurons to prune.
+---------------------------------------------------------------------------------------------
+---------------------------------------------------------------------------------------------

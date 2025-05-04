@@ -22,20 +22,32 @@ class MLP(nn.Module):
         self.w3 = nn.Parameter(self.w3 / torch.norm(self.w3))
         self.b3 = nn.Parameter(torch.zeros(output_dims))
 
+    
         self.masks = []
         self.masks.append(torch.ones_like(self.w1))
         self.masks.append(torch.ones_like(self.w2))
         self.masks.append(torch.ones_like(self.w3))
-        
+    
+    '''
     def update_masks(self, prune_layer, prune_neuron, prune_weight):
         self.masks[prune_layer][prune_neuron, prune_weight] = 0.0
-
+    '''
+    '''
     def forward(self, x):
         x = torch.matmul(x, (self.w1 * self.masks[0])) + self.b1
         x = self.a1(x)
         x = torch.matmul(x, (self.w2 * self.masks[1])) + self.b2
         x = self.a2(x)
         x = torch.matmul(x, (self.w3 * self.masks[2])) + self.b3
+        return x
+    '''
+
+    def forward(self, x):
+        x = torch.matmul(x, self.w1) + self.b1
+        x = self.a1(x)
+        x = torch.matmul(x, self.w2) + self.b2
+        x = self.a2(x)
+        x = torch.matmul(x, self.w3) + self.b3
         return x
         
     def collect_all_activations(self, x):

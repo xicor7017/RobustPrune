@@ -5,7 +5,7 @@ dataset:
   train_samples: 30  # Per class
   test_samples : 30  # Per class
   miss_samples : 3   # Per class
-  biased       : False  # True for biased dataset
+  biased       : True  # True for biased dataset
 
 model:
   lr: 0.001
@@ -14,3 +14,4 @@ model:
 
 prune:
   random_prune : False  # True for random pruning False for structured pruning
+  num_prune : 10  # Number of neurons to prune
