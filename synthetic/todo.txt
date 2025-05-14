@@ -28,3 +28,5 @@ Conclusions:
     SGD can work but also doesnt sometimes, may require tuning of how many neurons to prune.
 ---------------------------------------------------------------------------------------------
 ---------------------------------------------------------------------------------------------
+
+Biased dataset (In complex situations) can be seen as distributional shift.
