@@ -6,11 +6,25 @@ import pathlib
 import torch.nn as nn
 from hydra.utils import get_original_cwd
 
-from model import MLP
 from dataset import get_dataloaders
 
+from model import MLP
+from transformer_model import TransformerPrunableEncoder
+
 def overfit(cfg):
-    model   = MLP(hidden_dims=cfg.model.hidden_dims)    
+    if cfg.model.type.lower() == "mlp":
+        model   = MLP(hidden_dims=cfg.model.hidden_dims)    
+    else:
+        model    = TransformerPrunableEncoder(
+            input_dim=2,
+            d_model=32,
+            nhead=2,
+            num_layers=2,
+            dim_feedforward=32,
+            num_classes=5,
+            max_seq_len=1
+        )   
+
     train_data, test_data, miss_data, all_train, _ = get_dataloaders(
                                                                         cfg.dataset.train_samples,
                                                                         cfg.dataset.test_samples,

@@ -5,8 +5,11 @@ import random
 import torch.nn as nn
 from hydra.utils import get_original_cwd
 
-from model import MLP
+
 from dataset import get_dataloaders
+
+from model import MLP
+from transformer_model import TransformerPrunableEncoder
 
 from plot_decision_boundary import plot_decision_boundary
         
@@ -32,7 +35,21 @@ class Prune:
 
         #Load model
         self.cwd      = get_original_cwd()
-        self.model    = MLP(hidden_dims=cfg.model.hidden_dims) 
+        if cfg.model.type.lower() == "mlp":
+            self.model   = MLP(hidden_dims=cfg.model.hidden_dims) 
+        else:
+            self.model    = TransformerPrunableEncoder(
+                            input_dim=2,
+                            d_model=32,
+                            nhead=2,
+                            num_layers=2,
+                            dim_feedforward=32,
+                            num_classes=5,
+                            max_seq_len=1
+                        )
+            print("Remember to set num_prune = 100 for the transformer model in the config file.")
+            time.sleep(10)
+
         self.datatype = "biased" if cfg.dataset.biased else "unbiased"
         self.model.load_state_dict(torch.load(f"{self.cwd}/saved_models/overfitted_{self.datatype}.pt"))
 
@@ -125,62 +142,6 @@ class Prune:
         train_accuracy = round(train_accuracy, 4)
         
         return test_accuracy, train_accuracy, miss_accuracy
-    
-    def find_prune_candidates(self):
-        #Get all activations
-        for data, label in self.all_train:
-            data = data     
-            all_activations = self.model.collect_all_activations(data)
-
-        total_length = 0
-        for activation in all_activations:
-            total_length += activation.shape[0]*activation.shape[1]
-
-        stds = torch.FloatTensor([])
-        for layer, activation in enumerate(all_activations):
-            #Scale activations to min 0 and max 1 along the last dimension
-            activation = activation - torch.min(activation,-1, keepdim=True)[0]
-            activation = activation / (torch.max(activation,-1,keepdim=True)[0] + 1e-8)
-
-            #Find std along the last dim
-            std = torch.std(activation, -1, unbiased=False)
-            std_flatten = std.view(-1)
-            stds = torch.cat((stds, std_flatten), -1)
-
-        #Set the stds to inf if the corresponding parameter is already prunned
-        stds[self.prunned_idx.bool()] = float("inf")
-
-        #Sort the stds
-        std_sorted, indices = torch.sort(stds)
-        
-        #Get the index of the lowest std that is not zero
-        if self.random_prune:
-            lowest_std_indices = random.sample(range(total_length), self.cfg.prune.num_prune)
-        else:
-            lowest_std_indices = indices[std_sorted != 0][:self.cfg.prune.num_prune]
-        self.prunned_idx[lowest_std_indices[0]] = 1
-
-        prune_layers, prune_neurons, prune_weights = [], [], []
-
-        for lowest_std_indice in lowest_std_indices:
-            if lowest_std_indice < self.layer_sizes[0]:
-                prune_layer = 0
-                prune_neuron = lowest_std_indice // self.hidden_dims
-                prune_weight = (lowest_std_indice - (prune_neuron*self.hidden_dims)) % 2
-            elif lowest_std_indice < self.layer_sizes[0] + self.layer_sizes[1]:
-                prune_layer = 1
-                prune_neuron = (lowest_std_indice - self.layer_sizes[0]) // self.hidden_dims
-                prune_weight = (lowest_std_indice - self.layer_sizes[0]  - (prune_neuron*self.hidden_dims)) % self.hidden_dims
-            else:
-                prune_layer = 2
-                prune_neuron = (lowest_std_indice - self.layer_sizes[0] - self.layer_sizes[1]) // 5
-                prune_weight = (lowest_std_indice - self.layer_sizes[0] - self.layer_sizes[1] - (prune_neuron*5)) % self.hidden_dims
-
-            prune_layers.append(prune_layer)
-            prune_neurons.append(prune_neuron)
-            prune_weights.append(prune_weight)
-
-        return prune_layers, prune_neurons, prune_weights
 
     def start(self):
         self.hidden_dims = self.cfg.model.hidden_dims
@@ -200,15 +161,8 @@ class Prune:
             #Plot decision boundary
             if epoch % 50 == 0:
                 plot_decision_boundary(self.model, f"{self.cwd}/plots/{self.datatype}_{self.pruning_type}/{epoch}.png", test_accuracy, train_accuracy, miss_accuracy, biased=self.biased_dataset)
-                
-            #Find the prune candidates
-            prune_layers, prune_neurons, prune_weights = self.find_prune_candidates()
 
-            #For the prune layer and parameter index, set the parameter to zero
-            for prune_layer, prune_neuron, prune_weight in zip(prune_layers, prune_neurons, prune_weights):
-                for parameter_idx, parameter in enumerate(self.model.parameters()):
-                    if (parameter_idx // 2) == prune_layer and parameter_idx % 2 == 0:  #To avoid bias
-                        parameter.data[prune_neuron][prune_weight] = 0.0
+            self.model.prune_weights(self.all_train, self.cfg.prune.num_prune, prune_type="random" if self.random_prune else "structured")
                         
             #Retrain the model for 1 epoch on all training data
             for j in range(1):

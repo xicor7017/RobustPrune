@@ -22,6 +22,10 @@ Tanh (SGD) Does not work
 Conclusions:
     Synthetic testing is fairly robust to ReLU vs Tanh
     SGD can work but also doesnt sometimes, may require tuning of how many neurons to prune.
+    
+    New testing: 
+        Seems to work with bias as well.
+        Works without freezing pruned gradients as well, however, no zero weights in the network in that case.
 ---------------------------------------------------------------------------------------------
 ---------------------------------------------------------------------------------------------
 
@@ -30,4 +34,10 @@ Biased dataset (In complex situations) can be seen as distributional shift.
 
 ____________________________________
 
-Change pruning so that the weigths remain zero : Adam AdamW
+ToDo:
+    - Package nicely and push: Separate arguments for transformer as MLP.
+    - Try with the common hook that GPT suggested.
+
+    Then 2 parallel things
+    1. Find the insight on deciding num_prune / amount training.
+    2. Try all architectures with common hooks.
