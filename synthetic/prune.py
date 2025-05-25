@@ -3,6 +3,7 @@ import time
 import torch
 import random
 import torch.nn as nn
+from hydra.utils import get_original_cwd
 
 from model import MLP
 from dataset import get_dataloaders
@@ -15,6 +16,7 @@ class Prune:
         self.biased_dataset = cfg.dataset.biased
         self.random_prune   = cfg.prune.random_prune
 
+        print()
         print("Pruning type: {}".format("Random" if self.random_prune else "Structured"))
         print("Dataset type: {}".format("Biased" if self.biased_dataset else "Un-biased / Uniform"))
         time.sleep(2)
@@ -29,9 +31,10 @@ class Prune:
                                                                                                 )
 
         #Load model
-        self.model   = MLP(hidden_dims=cfg.model.hidden_dims) 
-        self.datatype     = "biased" if cfg.dataset.biased else "unbiased"
-        self.model.load_state_dict(torch.load(f"saved_models/overfitted_{self.datatype}.pt"))
+        self.cwd      = get_original_cwd()
+        self.model    = MLP(hidden_dims=cfg.model.hidden_dims) 
+        self.datatype = "biased" if cfg.dataset.biased else "unbiased"
+        self.model.load_state_dict(torch.load(f"{self.cwd}/saved_models/overfitted_{self.datatype}.pt"))
 
         #Get the initial accuracies
         test_accuracy, train_accuracy, miss_accuracy = self.get_accuracies()
@@ -41,13 +44,56 @@ class Prune:
         self.optimizer = torch.optim.AdamW(self.model.parameters(), lr=cfg.model.lr)
 
         # Create plots directory if it doesn't exist
-        if not os.path.exists("plots"):
-            os.makedirs("plots")
+        if not os.path.exists(f"{self.cwd}/plots"):
+            os.makedirs(f"{self.cwd}/plots")
         self.pruning_type = "random" if self.random_prune else "structured"
-        if not os.path.exists(f"plots/{self.datatype}_{self.pruning_type}"):
-            os.makedirs(f"plots/{self.datatype}_{self.pruning_type}")
+        if not os.path.exists(f"{self.cwd}/plots/{self.datatype}_{self.pruning_type}"):
+            os.makedirs(f"{self.cwd}/plots/{self.datatype}_{self.pruning_type}")
 
         self.start()
+
+    def freeze_pruned_gradients(self):
+        """
+        Zeroes out gradients on any parameter entries that are currently exactly zero,
+        so the optimizer will not update them.
+        Call this after loss.backward() but before optimizer.step().
+        """
+        for name, param in self.model.named_parameters():
+            if param.grad is None:
+                continue
+            # build a mask: 1.0 where param.data != 0, 0.0 where param.data == 0
+            keep_mask = param.data.ne(0.0).float()
+            # zero out gradients on pruned entries
+            param.grad.data.mul_(keep_mask)
+
+    def count_zero_parameters(self):
+        """
+        Count zero-valued parameters in the model, separately for weights vs. biases.
+
+        Returns:
+            zero_weights (int):   number of zero entries among all weight tensors
+            total_weights (int):  total number of entries among all weight tensors
+            zero_biases (int):    number of zero entries among all bias tensors
+            total_biases (int):   total number of entries among all bias tensors
+        """
+        zero_weights = 0
+        total_weights = 0
+        zero_biases = 0
+        total_biases = 0
+
+        for name, param in self.model.named_parameters():
+            # param.data is a Tensor
+            num_elements = param.numel()
+            num_zero     = int((param.data == 0).sum().item())
+
+            if "bias" in name:
+                zero_biases  += num_zero
+                total_biases += num_elements
+            else:
+                zero_weights += num_zero
+                total_weights += num_elements
+
+        return zero_weights, total_weights, zero_biases, total_biases
          
     def get_accuracies(self):
         #Evaluate accuracy on test, miss and train data
@@ -148,32 +194,22 @@ class Prune:
                 test_accuracy  = round(test_accuracy, 3)
                 miss_accuracy  = round(miss_accuracy, 3)
                 train_accuracy = round(train_accuracy, 3)
-                print(f"Epoch: {epoch} \t| Test: {test_accuracy} \t| Train: {train_accuracy} \t| Miss: {miss_accuracy}", end="\n")
+                zero_weights, total_weights, zero_biases, total_biases = self.count_zero_parameters()
+                print(f"\033[F\033[KEpoch: {epoch} \t| Test: {test_accuracy} \t| Train: {train_accuracy} \t| Miss: {miss_accuracy} \t| zw: {zero_weights} \t tw: {total_weights} zb: {zero_biases}, tb: {total_biases}", end="\n")
 
             #Plot decision boundary
             if epoch % 50 == 0:
-                plot_decision_boundary(self.model, f"plots/{self.datatype}_{self.pruning_type}/{epoch}.png", test_accuracy, train_accuracy, miss_accuracy, biased=self.biased_dataset)
+                plot_decision_boundary(self.model, f"{self.cwd}/plots/{self.datatype}_{self.pruning_type}/{epoch}.png", test_accuracy, train_accuracy, miss_accuracy, biased=self.biased_dataset)
                 
             #Find the prune candidates
             prune_layers, prune_neurons, prune_weights = self.find_prune_candidates()
 
-            #Manual:
             #For the prune layer and parameter index, set the parameter to zero
             for prune_layer, prune_neuron, prune_weight in zip(prune_layers, prune_neurons, prune_weights):
                 for parameter_idx, parameter in enumerate(self.model.parameters()):
-                    #print(parameter_idx, parameter.shape)
                     if (parameter_idx // 2) == prune_layer and parameter_idx % 2 == 0:  #To avoid bias
                         parameter.data[prune_neuron][prune_weight] = 0.0
-            
-
-            #Automatic:
-            #Set the corresponding masks to zero
-            '''
-            prune_layer, prune_neuron, prune_weight = prune_layers[0], prune_neurons[0], prune_weights[0]
-            if random.random() < 0.4:
-                self.model.update_masks(prune_layer, prune_neuron, prune_weight) 
-            '''    
-            
+                        
             #Retrain the model for 1 epoch on all training data
             for j in range(1):
                 for data in iter(self.all_train):
@@ -185,9 +221,8 @@ class Prune:
 
                     self.optimizer.zero_grad()
                     loss.backward()
+                    self.freeze_pruned_gradients()
                     self.optimizer.step()
-        
-        
 
 if __name__ == "__main__":
     Prune()

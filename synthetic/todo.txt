@@ -1,7 +1,3 @@
-Redo exps
-ReLU activation
-Without masks: Directly zero
-
 Add readme for training and pruning overfited models
 
 Trained with AdamW, prunned with:
@@ -30,3 +26,8 @@ Conclusions:
 ---------------------------------------------------------------------------------------------
 
 Biased dataset (In complex situations) can be seen as distributional shift.
+
+
+____________________________________
+
+Change pruning so that the weigths remain zero : Adam AdamW

@@ -2,7 +2,9 @@ import os
 import time
 import torch
 import random
+import pathlib
 import torch.nn as nn
+from hydra.utils import get_original_cwd
 
 from model import MLP
 from dataset import get_dataloaders
@@ -19,7 +21,7 @@ def overfit(cfg):
 
     criterion = torch.nn.CrossEntropyLoss()
     optimizer = torch.optim.Adam(model.parameters(), lr=cfg.model.lr)
-
+    print()
     print("Dataset type: {}".format("Biased" if cfg.dataset.biased else "Unbiased / Uniform"), end="\n\n")
     time.sleep(2)
 
@@ -74,12 +76,13 @@ def overfit(cfg):
         print(f" | Loss: {loss}")
         
     # Save the model
-    if not os.path.exists("saved_models"):
-        os.makedirs("saved_models")
+    cwd = get_original_cwd()
+    if not os.path.exists(f"{cwd}/saved_models"):
+        os.makedirs(f"{cwd}/saved_models")
 
     datatype = "biased" if cfg.dataset.biased else "unbiased"
-    torch.save(model.state_dict(), f"saved_models/overfitted_{datatype}.pt")
-    print("\nFinished")
+    torch.save(model.state_dict(), f"{cwd}/saved_models/overfitted_{datatype}.pt")
+    print("Finished")
 
 if __name__ == "__main__":
     random.seed(0)
