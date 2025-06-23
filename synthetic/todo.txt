@@ -1,43 +1,24 @@
-Add readme for training and pruning overfited models
+1. freeze_pruned_gradients Doesnt seem to be important.
+2. force_zero_weights is detrimental
 
-Trained with AdamW, prunned with:
+Optim testing:
     AdamW       Works
-    AdamW       Works
-    SGD         Does not work
+    Adam        Works
+    SGD         Almost works with more training / less pruning.
 
-ReLU (AdamW) works
-ReLU (Adam)  works
-ReLU (SGD)   WORKS !!  (More iterations)
-
-Just 2 instead of 10 weight drops
-ReLU (SGD)  works!
-ReLU (AdamW) works
-
-Just 2 instead of 10 weight drops
-Tanh (AdamW) works
-Tanh (SGD) Does not work
-
----------------------------------------------------------------------------------------------
----------------------------------------------------------------------------------------------
-Conclusions:
-    Synthetic testing is fairly robust to ReLU vs Tanh
-    SGD can work but also doesnt sometimes, may require tuning of how many neurons to prune.
-    
-    New testing: 
-        Seems to work with bias as well.
-        Works without freezing pruned gradients as well, however, no zero weights in the network in that case.
----------------------------------------------------------------------------------------------
----------------------------------------------------------------------------------------------
-
-Biased dataset (In complex situations) can be seen as distributional shift.
-
-
-____________________________________
+Activations testing:
+    ReLU (AdamW)    Works
+    ReLU (Adam)     Assuming that it works
+    ReLU (SGD)      Works with more training / less pruning.
 
 ToDo:
-    - Package nicely and push: Separate arguments for transformer as MLP.
-    - Try with the common hook that GPT suggested.
+    - Test current pruning is working (Just run the bash script)
+    - The current Prune_utils.py only support nn.Linear. Extend it to our use cases. Can we make it more general to directly nn.Parameters() ?
+    - Make datasets for images, sequences, transformers and test the common prune_utils.py on them.
+    - Find the insight on deciding num_prune / amount training.
+    - Test the insight.
+    - Start doing the paper experiments.
 
-    Then 2 parallel things
-    1. Find the insight on deciding num_prune / amount training.
-    2. Try all architectures with common hooks.
+The challenge is that we can enforce zero weights, but then the model "looses" capacity / plasticity to learn new stuff.
+
+WE DO NOT WANT PRUNING FOR FASTER INFERENCE. SO WE DO NOT CARE FOR THIS : If we dont enforce zeros weights, then the model doesnt prune a significant number of weights.

@@ -5,7 +5,7 @@ import random
 import torch.nn as nn
 from hydra.utils import get_original_cwd
 
-
+from prune_utils import Pruner
 from dataset import get_dataloaders
 
 from model import MLP
@@ -36,7 +36,9 @@ class Prune:
         #Load model
         self.cwd      = get_original_cwd()
         if cfg.model.type.lower() == "mlp":
-            self.model   = MLP(hidden_dims=cfg.model.hidden_dims) 
+            self.model   = MLP(hidden_dims=cfg.model.hidden_dims)
+            print("Remember to set num_prune = 10 for the transformer model in the config file.")
+            time.sleep(1) 
         else:
             self.model    = TransformerPrunableEncoder(
                             input_dim=2,
@@ -48,7 +50,7 @@ class Prune:
                             max_seq_len=1
                         )
             print("Remember to set num_prune = 100 for the transformer model in the config file.")
-            time.sleep(10)
+            time.sleep(1)
 
         self.datatype = "biased" if cfg.dataset.biased else "unbiased"
         self.model.load_state_dict(torch.load(f"{self.cwd}/saved_models/overfitted_{self.datatype}.pt"))
@@ -67,8 +69,29 @@ class Prune:
         if not os.path.exists(f"{self.cwd}/plots/{self.datatype}_{self.pruning_type}"):
             os.makedirs(f"{self.cwd}/plots/{self.datatype}_{self.pruning_type}")
 
+
+        self.pruner = Pruner(self.model)
+
         self.start()
 
+    def print_model_architecture(self, model: nn.Module):
+        """
+        Recursively prints all submodules in the given model.
+        """
+        for x in model.named_children():
+            print(x)
+            '''
+            # skip the top‐level module if you only want its children:
+            if name == "":
+                pass
+                #print(f"{model.__class__.__name__}:")
+            else:
+                print(f"{name}: {layer}")
+            '''
+
+        time.sleep(1000)
+
+    '''
     def freeze_pruned_gradients(self):
         """
         Zeroes out gradients on any parameter entries that are currently exactly zero,
@@ -82,6 +105,7 @@ class Prune:
             keep_mask = param.data.ne(0.0).float()
             # zero out gradients on pruned entries
             param.grad.data.mul_(keep_mask)
+    '''
 
     def count_zero_parameters(self):
         """
@@ -156,16 +180,20 @@ class Prune:
                 miss_accuracy  = round(miss_accuracy, 3)
                 train_accuracy = round(train_accuracy, 3)
                 zero_weights, total_weights, zero_biases, total_biases = self.count_zero_parameters()
-                print(f"\033[F\033[KEpoch: {epoch} \t| Test: {test_accuracy} \t| Train: {train_accuracy} \t| Miss: {miss_accuracy} \t| zw: {zero_weights} \t tw: {total_weights} zb: {zero_biases}, tb: {total_biases}", end="\n")
+                
+                total_masks = self.pruner.mask.float().sum().item()
+
+                print(f"\033[F\033[KEpoch: {epoch} \t| Test: {test_accuracy} \t| Train: {train_accuracy} \t| Miss: {miss_accuracy} \t| zw: {zero_weights} \t tw: {total_weights} zb: {zero_biases}, tb: {total_masks}", end="\n")
 
             #Plot decision boundary
             if epoch % 50 == 0:
                 plot_decision_boundary(self.model, f"{self.cwd}/plots/{self.datatype}_{self.pruning_type}/{epoch}.png", test_accuracy, train_accuracy, miss_accuracy, biased=self.biased_dataset)
 
-            self.model.prune_weights(self.all_train, self.cfg.prune.num_prune, prune_type="random" if self.random_prune else "structured")
-                        
+            with torch.no_grad():
+                self.pruner.prune_weights(self.all_train, self.cfg.prune.num_prune, prune_type="random" if self.random_prune else "structured")
+
             #Retrain the model for 1 epoch on all training data
-            for j in range(1):
+            for j in range(10):
                 for data in iter(self.all_train):
                     inputs, labels = data
                     inputs = inputs
@@ -175,8 +203,9 @@ class Prune:
 
                     self.optimizer.zero_grad()
                     loss.backward()
-                    self.freeze_pruned_gradients()
+                    #self.pruner.freeze_pruned_gradients()
                     self.optimizer.step()
+                    #self.pruner.force_zero_weights()
 
 if __name__ == "__main__":
     Prune()

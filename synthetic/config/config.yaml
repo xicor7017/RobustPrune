@@ -13,7 +13,7 @@ model:
   batch_size  : -1  # -1 for full batch
   hidden_dims : 32
 
-
 prune:
   random_prune : False  # True for random pruning False for structured pruning
-  num_prune    : 10     # Number of neurons to prune
+  num_prune    : 10      # Number of neurons to prune
+  #mask_reset_interval: 50
