@@ -172,7 +172,7 @@ class Prune:
         self.layer_sizes = [2*self.hidden_dims, self.hidden_dims*self.hidden_dims, self.hidden_dims*5]
         self.prunned_idx = torch.zeros((sum(self.layer_sizes),))
 
-        for epoch in range(2001):
+        for epoch in range(401):
             test_accuracy, train_accuracy, miss_accuracy = self.get_accuracies()
 
             if epoch % 10 == 0:
@@ -184,6 +184,8 @@ class Prune:
                 total_masks = self.pruner.mask.float().sum().item()
 
                 print(f"\033[F\033[KEpoch: {epoch} \t| Test: {test_accuracy} \t| Train: {train_accuracy} \t| Miss: {miss_accuracy} \t| zw: {zero_weights} \t tw: {total_weights} zb: {zero_biases}, tb: {total_masks}", end="\n")
+                #print(f"Epoch: {epoch} \t| Test: {test_accuracy} \t| Train: {train_accuracy} \t| Miss: {miss_accuracy} \t| zw: {zero_weights} \t tw: {total_weights} zb: {zero_biases}, tb: {total_masks}", end="\n")
+
 
             #Plot decision boundary
             if epoch % 50 == 0:
@@ -191,7 +193,7 @@ class Prune:
 
             with torch.no_grad():
                 self.pruner.prune_weights(self.all_train, self.cfg.prune.num_prune, prune_type="random" if self.random_prune else "structured")
-
+                
             #Retrain the model for 1 epoch on all training data
             for j in range(10):
                 for data in iter(self.all_train):

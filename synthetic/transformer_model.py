@@ -6,6 +6,7 @@ class TransformerPrunableEncoder(nn.Module):
     def __init__(self, input_dim, d_model, nhead, num_layers, dim_feedforward, num_classes, max_seq_len):
         super().__init__()
         # Input projection + positional embeddings
+        
         self.embedding = nn.Linear(input_dim, d_model)
         self.pos_embedding = nn.Parameter(torch.randn(1, max_seq_len, d_model))
         # Transformer encoder stack
@@ -13,17 +14,48 @@ class TransformerPrunableEncoder(nn.Module):
             d_model=d_model,
             nhead=nhead,
             dim_feedforward=dim_feedforward,
-            dropout=0.0
+            dropout=0.00,
+            #batch_first=False
         )
         self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
+        self.classifier = nn.Linear(d_model, num_classes)
+        
+
+        '''
+        # Input projection + positional embeddings
+        self.embedding = nn.Linear(input_dim, d_model)
+        self.pos_embedding = nn.Parameter(torch.randn(1, max_seq_len, d_model))
+
+        # build one encoder layer…
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=d_model,
+            nhead=nhead,
+            dim_feedforward=dim_feedforward,
+            dropout=0.0,
+            #batch_first=True
+        )
+
+        # ← override the .out_proj to a “plain” Linear
+        proj = encoder_layer.self_attn.out_proj
+        new_proj = nn.Linear(proj.in_features, proj.out_features, bias=(proj.bias is not None))
+        # (optional) copy existing weights/bias if you care:
+        new_proj.weight.data.copy_(proj.weight.data)
+        if proj.bias is not None:
+            new_proj.bias.data.copy_(proj.bias.data)
+        encoder_layer.self_attn.out_proj = new_proj
+
+        # …then stack them
+        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
+
         # Classification head
         self.classifier = nn.Linear(d_model, num_classes)
+        '''
 
     def forward(self, x):
         # x: (batch, seq_len, input_dim)
         if len(x.shape) != 3:
             x = x.unsqueeze(1)  # Ensure input is (batch, seq_len, input_dim)
-            
+
         batch_size, seq_len, _ = x.size()
         # Embed + add positional encoding
         embed = self.embedding(x) + self.pos_embedding[:, :seq_len, :]

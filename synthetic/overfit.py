@@ -85,7 +85,7 @@ def overfit(cfg):
                 loss.backward()
                 optimizer.step()
 
-        loss  = round(loss.item(), 3)
+        loss  = loss.item()
         print(f" | Loss: {loss}")
         
     # Save the model

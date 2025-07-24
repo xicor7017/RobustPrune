@@ -8,12 +8,12 @@ dataset:
   biased        : False  # True for biased dataset
 
 model:
-  type        : mlp  # mlp / transformer
+  type        : transformer  # mlp / transformer
   lr          : 0.001
   batch_size  : -1  # -1 for full batch
   hidden_dims : 32
 
 prune:
   random_prune : False  # True for random pruning False for structured pruning
-  num_prune    : 10      # Number of neurons to prune
+  num_prune    : 50      # Number of neurons to prune
   #mask_reset_interval: 50

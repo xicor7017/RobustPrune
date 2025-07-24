@@ -19,6 +19,16 @@ ToDo:
     - Test the insight.
     - Start doing the paper experiments.
 
-The challenge is that we can enforce zero weights, but then the model "looses" capacity / plasticity to learn new stuff.
+The challenge is that we can enforce zero weights, but then the model "looses" capacity / plasticity to learn new stuff:
+THINK OF A RATIO, THE WEIGHTS THAT WE ARE ZEROING RATIO WITH THE WEIGHTS THAT WE ARE ENFORCING TO BE ZERO.
 
 WE DO NOT WANT PRUNING FOR FASTER INFERENCE. SO WE DO NOT CARE FOR THIS : If we dont enforce zeros weights, then the model doesnt prune a significant number of weights.
+
+https://nicholas.carlini.com/writing/2019/all-adversarial-example-papers.html
+
+https://arxiv.org/pdf/2506.11615
+
+
+__________________________________
+1. candidate scoring should not score std zero candidates.
+2. global count of absolute zero indices.
