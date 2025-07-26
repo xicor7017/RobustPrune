@@ -5,3 +5,5 @@ backup/
 **saved_models/
 **plots/
 **outputs/
+**data/
+**runs/
