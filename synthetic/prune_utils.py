@@ -156,7 +156,8 @@ class Pruner:
             for inputs, _ in data_loader:
                 self.model(inputs)
 
-    def compute_scores(self):
+    def compute_scores_older(self):
+        # Problem with this version is that it does not normalize the variance with mean but rather standardizes it.
         scores = {}
         eps = 1e-8
         for layer, batched in self.activations.items():
@@ -166,6 +167,21 @@ class Pruner:
             normed = (data - min_vals) / (max_vals - min_vals + eps)
             stds = normed.std(dim=0, unbiased=False)  # [W]
             scores[layer] = stds
+        return scores
+    
+    def compute_scores(self):
+        scores = {}
+        eps = 1e-8  # To prevent division by zero
+        for layer, batched in self.activations.items():
+            data = torch.cat(batched, dim=0)  # Shape: [N, W]
+            
+            means = data.mean(dim=0)          # Shape: [W]
+            variances = data.var(dim=0, unbiased=False)  # Shape: [W]
+            
+            # Relative variance: σ² / (μ + ε)
+            rel_var = variances / (means.abs() + eps)  # abs(μ) to prevent negative ratios
+            
+            scores[layer] = rel_var
         return scores
 
     # ----------------------------------------------------------------------

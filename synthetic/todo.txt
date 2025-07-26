@@ -28,7 +28,8 @@ https://nicholas.carlini.com/writing/2019/all-adversarial-example-papers.html
 
 https://arxiv.org/pdf/2506.11615
 
+https://arxiv.org/pdf/2501.14182v1
+
 
 __________________________________
-1. candidate scoring should not score std zero candidates.
-2. global count of absolute zero indices.
+
