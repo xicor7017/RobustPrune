@@ -4,227 +4,321 @@ from collections import defaultdict
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from torch.nn.modules.linear import NonDynamicallyQuantizableLinear
 
 
 class Pruner:
     """
-    Prunes weights based on weight-wise activation variability.
+    Pruner: A class to perform activation variability-based pruning of model weights.
 
-    Changes from the original file:
-    - We DO NOT hook `out_proj` (or any other Linear) inside `nn.MultiheadAttention` directly.
-      Instead, we hook the *parent* `nn.MultiheadAttention` module and manually compute the
-      per-weight contributions for its `out_proj` using the tensors available in the hook.
-    - All public method signatures and return values are preserved.
-    - Linear layers that belong to an MHA block are still prunable, but they are not double-hooked.
+    This class tracks and prunes the following weights based on their relative activation variance:
+      1. Standalone Linear layers (nn.Linear, NonDynamicallyQuantizableLinear) outside MultiheadAttention (MHA).
+      2. MultiheadAttention internal weights:
+         - in_proj_weight (combined Query, Key, Value projection)
+         - out_proj.weight (final attention output projection)
+
+    Pruning Workflow:
+      a. Register forward hooks to capture per-weight contributions (excluding biases).
+      b. Run a forward pass over a data_loader to collect activations.
+      c. Remove hooks to avoid side effects.
+      d. Compute relative variance scores: variance / (mean + epsilon).
+      e. Select lowest-scoring weights (structured) or random weights.
+      f. Update a global mask and zero out selected weights in place.
+      g. Optionally freeze gradients of pruned weights during backprop.
+
+    Attributes:
+        model (nn.Module): The PyTorch model under pruning.
+        prunable (list of dict): Metadata entries for each prunable weight tensor.
+        mask (torch.BoolTensor): Global flat mask indicating pruned weights.
+        activations (defaultdict(list)): Collected activation tensors per layer key.
+        prune_indices (list[int]): Indices chosen for pruning in the last operation.
+        handles (list): Registered forward hook handles.
     """
 
     def __init__(self, model: nn.Module):
+        """
+        Initialize the Pruner by discovering all prunable weights and setting up masks.
+
+        Args:
+            model (nn.Module): The neural network model to prune.
+
+        Side-effects:
+            - Populates self.prunable with entries for each weight tensor and its flat offset.
+            - Initializes self.mask to all False (no weights pruned initially).
+        """
         self.model = model
 
-        # ------------------------------------------------------------------
-        # Identify modules
-        # ------------------------------------------------------------------
-        self.prunable = []               # list of dicts with module info
-        self._mha_names = set()          # names of all nn.MultiheadAttention modules
-        self._linears_in_mha = set()     # names of Linear/NDQL that are children of an MHA
+        # Detect all MultiheadAttention modules by name for exclusion/inclusion logic
+        self._mha_names = {
+            name for name, m in model.named_modules()
+            if isinstance(m, nn.MultiheadAttention)
+        }
 
-        # First pass: record all MHA module names
-        for name, module in model.named_modules():
-            if isinstance(module, nn.MultiheadAttention):
-                self._mha_names.add(name)
-
-        # Helper to check if a module name is under an MHA by prefix match
-        def _is_child_of_mha(mod_name: str) -> bool:
-            return any(mod_name.startswith(mha_name + '.') for mha_name in self._mha_names)
-
+        # Build prunable list, tracking offsets into a global flat parameter vector
+        self.prunable = []
         offset = 0
+
+        def is_under_mha(name: str) -> bool:
+            """Return True if a module name is a child of any MHA block."""
+            return any(name.startswith(mha + ".") for mha in self._mha_names)
+
+        # 1) Standalone Linear / NDQL layers outside MHA
         for name, module in model.named_modules():
             if isinstance(module, (nn.Linear, NonDynamicallyQuantizableLinear)):
-                if _is_child_of_mha(name):
-                    self._linears_in_mha.add(name)
-                weight = module.weight
-                numel = weight.numel()
+                if is_under_mha(name):
+                    # Skip linears that are part of an MHA block
+                    continue
+                w = module.weight
+                n = w.numel()
                 self.prunable.append({
                     'name': name,
                     'module': module,
-                    'shape': weight.shape,
-                    'numel': numel,
+                    'param_name': 'weight',
+                    'shape': tuple(w.shape),
+                    'numel': n,
                     'offset': offset,
                 })
-                offset += numel
+                offset += n
 
-        print(f"Found a total of {offset} prunable weights.")
+        # 2) MHA internal weights: in_proj_weight and out_proj.weight
+        for name, module in model.named_modules():
+            if isinstance(module, nn.MultiheadAttention):
+                # Combined QKV projection weight
+                w_qkv = module.in_proj_weight
+                n_qkv = w_qkv.numel()
+                self.prunable.append({
+                    'name': f"{name}:in_proj_weight",
+                    'module': module,
+                    'param_name': 'in_proj_weight',
+                    'shape': tuple(w_qkv.shape),
+                    'numel': n_qkv,
+                    'offset': offset,
+                })
+                offset += n_qkv
 
-        # Global flat mask
+                # Output projection weight
+                w_out = module.out_proj.weight
+                n_out = w_out.numel()
+                self.prunable.append({
+                    'name': f"{name}:out_proj",
+                    'module': module,
+                    'param_name': 'out_proj.weight',
+                    'shape': tuple(w_out.shape),
+                    'numel': n_out,
+                    'offset': offset,
+                })
+                offset += n_out
+
+        # Initialize pruning mask: False => keep, True => pruned
+        print(f"Found a total of {offset} prunable weights.", end='\n\n')
         self.mask = torch.zeros(offset, dtype=torch.bool)
 
-        # Runtime containers
+        # Runtime containers for hooks and collected activations
         self.handles = []
-        self.activations = defaultdict(list)   # layer_name -> [batch_flat tensors]
+        self.activations = defaultdict(list)
         self.prune_indices = []
 
-    # ----------------------------------------------------------------------
-    # Hook registration / removal
-    # ----------------------------------------------------------------------
     def _register_hooks(self):
-        """Attach hooks to (1) parent MHA blocks, (2) Linear layers NOT inside an MHA."""
-        # 1) Hook all MHA parents
+        """
+        Attach forward hooks to collect per-weight contributions.
+
+        - Hooks on MHA parents to capture both in_proj and out_proj contributions.
+        - Hooks on standalone Linear modules outside MHA.
+        """
+        # Hook MHA modules
         for name, module in self.model.named_modules():
             if isinstance(module, nn.MultiheadAttention):
-                h = module.register_forward_hook(self._make_mha_hook(name))
+                h = module.register_forward_hook(
+                    self._make_mha_hook(name, module)
+                )
                 self.handles.append(h)
 
-        # 2) Hook all other linears (that are not children of an MHA)
-        allowed_linears = (nn.Linear, NonDynamicallyQuantizableLinear)
-        for name, module in self.model.named_modules():
-            if isinstance(module, allowed_linears) and name not in self._linears_in_mha:
-                h = module.register_forward_hook(self._make_linear_hook(name))
+        # Hook standalone linears
+        for entry in self.prunable:
+            if entry['param_name'] == 'weight':
+                m = entry['module']
+                h = m.register_forward_hook(
+                    self._make_linear_hook(entry['name'])
+                )
                 self.handles.append(h)
 
     def _remove_hooks(self):
+        """Remove all registered forward hooks to restore original model behavior."""
         for h in self.handles:
             h.remove()
         self.handles.clear()
 
-    # ----------------------------------------------------------------------
-    # Hook makers
-    # ----------------------------------------------------------------------
-    def _make_linear_hook(self, layer_name):
-        """Standard Linear hook: capture x * w contributions."""
+    def _make_linear_hook(self, layer_name: str):
+        """
+        Create a forward hook for a standalone Linear module.
+
+        Args:
+            layer_name (str): Key under which to store collected activations.
+
+        Returns:
+            hook (callable): Forward hook capturing x*w contributions.
+        """
         def hook(module, inputs, outputs):
+            # inputs[0]: the input tensor x of shape [..., in_features]
             x = inputs[0].detach()
-            x_flat = x.reshape(-1, x.shape[-1])
-            w = module.weight.detach()
+            x_flat = x.reshape(-1, x.shape[-1])  # [N, in]
+            w = module.weight.detach()          # [out, in]
+            # contribution[b,i,j] = x[b, j] * w[i, j]
             contrib = x_flat.unsqueeze(1) * w.unsqueeze(0)  # [N, out, in]
-            batch_flat = contrib.view(contrib.size(0), -1)
+            batch_flat = contrib.view(contrib.size(0), -1)  # [N, out*in]
             self.activations[layer_name].append(batch_flat)
+
         return hook
 
-    def _make_mha_hook(self, layer_name):
+    def _make_mha_hook(self, mha_name: str, module: nn.MultiheadAttention):
         """
-        Hook for nn.MultiheadAttention parent module.
+        Create a forward hook for nn.MultiheadAttention to capture:
+          1) in_proj_weight contributions from Q, K, V projections.
+          2) out_proj.weight contributions from the post-attention output.
 
-        We reconstruct per-weight contributions for the *out_proj* weight using the inputs/outputs
-        that are available to the parent module.
+        Args:
+            mha_name (str): Unique identifier for this MHA module.
+            module (nn.MultiheadAttention): The module instance.
 
-        PyTorch's internal implementation calls F.linear(attn_output, out_proj.weight...), bypassing
-        the Linear module forward. In the parent hook we get:
-            inputs:  (query, key, value, ...)  (tuple)
-            outputs: (attn_output, attn_weights) or (attn_output,) depending on need_weights
-
-        We cannot directly access the pre-projection tensor (the one fed into F.linear), but we *can*
-        recompute the per-weight contributions using the same formula if we also get that tensor.
-
-        Strategy:
-        - Re-run a minimal piece of code to get the pre-projection tensor by calling
-          torch.nn.functional.multi_head_attention_forward with `need_weights=False` and capturing
-          the returned attn_output BEFORE applying out_proj.
-        - BUT F.multi_head_attention_forward itself already applies the projection, so we can't grab
-          it mid-way. Instead, we abuse the fact that `out_proj.weight` is used at the very end and
-          reconstruct x_pre via: x_pre = F.linear^{-1}(attn_output, W, b). This inverse is not exact
-          unless W is square & invertible. To avoid instability, we approximate contributions using
-          the *attn_output* (post-projection) as the "input" proxy. This keeps relative variance info
-          useful for pruning, although it's not mathematically identical.
-
-        If you later want the exact pre-proj tensor, patching or FX is required. For now we follow the
-        user's preference to avoid patching and keep forward signatures intact.
+        Returns:
+            hook (callable): Forward hook for MHA.
         """
-        def hook(module: nn.MultiheadAttention, inputs, outputs):
-            # outputs[0]: attn_output AFTER projection
-            attn_out = outputs[0].detach()  # shape: [L, N, E] or [N, L, E] (depends on batch_first)
-            # Flatten last dim is embed_dim (= in_features for out_proj)
-            x_flat = attn_out.reshape(-1, attn_out.shape[-1])
+        def hook(mod, inputs, outputs):
+            # 1) Q/K/V projection contributions
+            q, k, v = inputs[0].detach(), inputs[1].detach(), inputs[2].detach()
+            E = module.embed_dim
+            # Flatten batch/spatial dims to a single N for each
+            qf = q.reshape(-1, E)
+            kf = k.reshape(-1, E)
+            vf = v.reshape(-1, E)
 
-            w = module.out_proj.weight.detach()  # [out_features, in_features]
-            contrib = x_flat.unsqueeze(1) * w.unsqueeze(0)  # [samples, out, in]
-            batch_flat = contrib.view(contrib.size(0), -1)
+            # in_proj_weight shape: [3*E, E]
+            w_qkv = module.in_proj_weight.detach()
+            w_q, w_k, w_v = w_qkv.chunk(3, dim=0)  # each [E, E]
 
-            # Store under the out_proj's logical name so downstream code is unchanged
-            proj_name = f"{layer_name}.out_proj"
-            self.activations[proj_name].append(batch_flat)
+            # Compute per-weight contributions and concatenate
+            cq = qf.unsqueeze(1) * w_q.unsqueeze(0)
+            ck = kf.unsqueeze(1) * w_k.unsqueeze(0)
+            cv = vf.unsqueeze(1) * w_v.unsqueeze(0)
+            c_qkv = torch.cat([cq, ck, cv], dim=1)  # [N, 3E, E]
+            flat_qkv = c_qkv.view(c_qkv.size(0), -1)  # [N, 3E*E]
+            self.activations[f"{mha_name}:in_proj_weight"].append(flat_qkv)
+
+            # 2) out_proj contributions
+            attn_out = outputs[0].detach()
+            batch_first = getattr(module, "batch_first", False)
+            if batch_first:
+                oflat = attn_out.reshape(-1, E)  # [N*L, E]
+            else:
+                oflat = attn_out.permute(1, 0, 2).reshape(-1, E)
+
+            w_out = module.out_proj.weight.detach()  # [out, E]
+            contrib_out = oflat.unsqueeze(1) * w_out.unsqueeze(0)  # [N*L, out, E]
+            flat_out = contrib_out.view(contrib_out.size(0), -1)   # [N*L, out*E]
+            self.activations[f"{mha_name}:out_proj"].append(flat_out)
+
         return hook
 
-    # ----------------------------------------------------------------------
-    # Data collection and scoring
-    # ----------------------------------------------------------------------
     def collect_activations(self, data_loader):
+        """
+        Run a single forward sweep over data_loader in eval mode to populate self.activations.
+
+        Args:
+            data_loader (Iterable): Yields (inputs, labels) tuples; labels are ignored.
+        """
         self.activations.clear()
         self.model.eval()
         with torch.no_grad():
             for inputs, _ in data_loader:
                 self.model(inputs)
 
-    def compute_scores_older(self):
-        # Problem with this version is that it does not normalize the variance with mean but rather standardizes it.
-        scores = {}
-        eps = 1e-8
-        for layer, batched in self.activations.items():
-            data = torch.cat(batched, dim=0)          # [N, W]
-            min_vals = data.min(dim=0, keepdim=True)[0]
-            max_vals = data.max(dim=0, keepdim=True)[0]
-            normed = (data - min_vals) / (max_vals - min_vals + eps)
-            stds = normed.std(dim=0, unbiased=False)  # [W]
-            scores[layer] = stds
-        return scores
-    
     def compute_scores(self):
+        """
+        Compute relative variance scores for each prunable weight.
+
+        Returns:
+            Dict[str, torch.Tensor]: layer_name -> 1D tensor of relative variances.
+        """
+        eps = 1e-8
         scores = {}
-        eps = 1e-8  # To prevent division by zero
-        for layer, batched in self.activations.items():
-            data = torch.cat(batched, dim=0)  # Shape: [N, W]
-            
-            means = data.mean(dim=0)          # Shape: [W]
-            variances = data.var(dim=0, unbiased=False)  # Shape: [W]
-            
-            # Relative variance: σ² / (μ + ε)
-            rel_var = variances / (means.abs() + eps)  # abs(μ) to prevent negative ratios
-            
-            scores[layer] = rel_var
+        for layer, batches in self.activations.items():
+            data = torch.cat(batches, dim=0)           # [N, W]
+            means = data.mean(dim=0).abs() + eps       # [W]
+            vars_ = data.var(dim=0, unbiased=False)    # [W]
+            scores[layer] = vars_ / means              # [W]
         return scores
 
-    # ----------------------------------------------------------------------
-    # Selecting and applying pruning
-    # ----------------------------------------------------------------------
     def get_weight_indices(self, scores, num_prune, prune_type='random'):
+        """
+        Select flat weight indices to prune from the global mask space.
+
+        Args:
+            scores (dict): Mapping layer_name -> 1D relative-variance tensor.
+            num_prune (int): Number of weights to prune this round.
+            prune_type (str): 'structured' uses lowest scores; otherwise random.
+
+        Returns:
+            List[int]: Flat indices into the global parameter vector.
+        """
         if prune_type == 'structured':
-            all_scores = torch.cat(list(scores.values()))
+            # Concatenate in the same order as self.prunable
+            all_scores = torch.cat([scores[e['name']] for e in self.prunable])
             all_scores[self.mask] = float('inf')
-            all_scores[all_scores<=0.0] = float('inf')
-            sorted_idx = torch.argsort(all_scores)
-            candidates = sorted_idx[:num_prune].tolist()
+            all_scores[all_scores <= 0] = float('inf')
+            idx = torch.argsort(all_scores)
+            return idx[:num_prune].tolist()
         else:
-            candidates = random.sample(range(len(self.mask)), num_prune)
-        return candidates
+            return random.sample(range(self.mask.numel()), num_prune)
 
     def prune(self, indices):
-        prune_mask = torch.zeros_like(self.mask)
-        prune_mask[indices] = True
-        for entry in self.prunable:
-            module = entry['module']
-            w = module.weight.data
-            local = prune_mask[entry['offset']: entry['offset'] + entry['numel']].view_as(w)
-            w[local] = 0.0
+        """
+        Zero out the weights at specified global indices.
+
+        Args:
+            indices (List[int]): Flat indices to prune (zero-in).
+        """
+        pmask = torch.zeros_like(self.mask)
+        pmask[indices] = True
+
+        # Apply mask to each parameter tensor using its offset
+        for e in self.prunable:
+            # Resolve tensor by traversing param_name
+            names = e['param_name'].split('.')
+            tensor = e['module']
+            for n in names:
+                tensor = getattr(tensor, n)
+            w_flat = tensor.data.view(-1)
+            segment = pmask[e['offset']: e['offset'] + e['numel']]
+            w_flat[segment] = 0.0
 
     def prune_weights(self, data_loader, num_prune, prune_type='random'):
-        # Capture activations
+        """
+        High-level pruning API: collect activations, score, select, and prune.
+
+        Args:
+            data_loader (Iterable): Used to collect activations.
+            num_prune (int): How many weights to prune.
+            prune_type (str): 'structured' or 'random'.
+        """
         self._register_hooks()
         self.collect_activations(data_loader)
         self._remove_hooks()
 
-        # Score and select
         scores = self.compute_scores()
         self.prune_indices = self.get_weight_indices(scores, num_prune, prune_type)
         self.mask[self.prune_indices] = True
         self.prune(self.prune_indices)
 
-    # ----------------------------------------------------------------------
-    # Training-time gradient freezing
-    # ----------------------------------------------------------------------
     def freeze_pruned_gradients(self):
-        for entry in self.prunable:
-            weight = entry['module'].weight
-            if weight.grad is not None:
-                keep = (~self.mask[entry['offset']: entry['offset'] + entry['numel']]).view_as(weight)
-                weight.grad.mul_(keep.float().to(weight.grad.device))
+        """
+        Zero out gradients for pruned weights after backprop.
+        Should be called after loss.backward() in training loop.
+        """
+        for e in self.prunable:
+            names = e['param_name'].split('.')
+            tensor = e['module']
+            for n in names:
+                tensor = getattr(tensor, n)
+            if tensor.grad is not None:
+                keep = (~self.mask[e['offset']: e['offset'] + e['numel']]).view_as(tensor)
+                tensor.grad.mul_(keep.float().to(tensor.grad.device))
